@@ -70,7 +70,16 @@ ssh "$target" git:set "$app" rev-env-var DOKKU_GIT_REV >/dev/null
 ssh "$target" builder:set "$app" selected dockerfile >/dev/null
 previous=$(ssh "$target" config:get "$app" GIT_REV 2>/dev/null || true)
 ssh "$target" config:set --no-restart "$app" "GIT_REV=$sha" >/dev/null
-if ! ssh "$target" git:from-image "$app" "$ref"; then
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+if ! ssh "$target" git:from-image "$app" "$ref" 2>&1 | tee "$log"; then
+  # Same image as the last attempt (for example after a failed release):
+  # Dokku skips it, so rebuild the app from the image it already has.
+  if grep -q "No changes detected" "$log" && ssh "$target" ps:rebuild "$app"; then
+    ssh "$target" ps:report "$app" | grep -E 'Running|Status ' || true
+    echo "deploy: done $app $sha"
+    exit 0
+  fi
   # The running release is unchanged; put its GIT_REV back.
   [ -n "$previous" ] && ssh "$target" config:set --no-restart "$app" "GIT_REV=$previous" >/dev/null
   die "git:from-image failed; $app still runs ${previous:-its previous release}"
