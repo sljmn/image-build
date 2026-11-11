@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Adds the image job and bin/deploy to an app repository.
 
-Usage: adopt REPO_DIR [--target dokku@HOST:APP] [--builder herokuish] [--build-env-file FILE] [--buildpacks URL,URL]
+Usage: adopt REPO_DIR [--target dokku@HOST:APP] [--builder herokuish] [--build-env-file FILE] [--buildpacks URL,URL] [--image-only BRANCH]
+With --image-only, writes .github/workflows/image.yml that builds on every push
+to BRANCH without a test gate (for repositories without working CI).
 Makes CI run on pushes to the default branch, appends the `image` job after
 every existing job and writes bin/deploy. Docs are edited by hand.
 """
@@ -13,35 +15,53 @@ builder = "dockerfile"
 build_env = ""
 target = ""
 buildpacks = ""
+image_only = ""
 while args:
     a = args.pop(0)
     if a == "--builder": builder = args.pop(0)
     elif a == "--target": target = args.pop(0)
     elif a == "--buildpacks": buildpacks = args.pop(0)
+    elif a == "--image-only": image_only = args.pop(0)
     elif a == "--build-env-file": build_env = open(args.pop(0)).read().strip()
 
-ci = os.path.join(repo, ".github/workflows/ci.yml")
-os.makedirs(os.path.dirname(ci), exist_ok=True)
-s = open(ci).read()
-if "sljmn/image-build" in s:
-    sys.exit("already adopted")
+if image_only:
+    ci = os.path.join(repo, ".github/workflows/image.yml")
+    os.makedirs(os.path.dirname(ci), exist_ok=True)
+    s = f"""name: Image
 
-on = re.search(r"^on:\n((?:[ \t].*\n|\n)*?)(?=^\S)", s, re.M)
-if not re.search(r"^  push:", on.group(1), re.M):
-    s = s.replace(on.group(0), "on:\n  push:\n" + on.group(1), 1)
+# Builds the production image on Avrea for every push to {image_only} and pushes
+# it to GHCR. bin/deploy deploys it with dokku git:from-image; the server builds
+# nothing. No test gate: this repository has no working CI on GitHub yet.
+on:
+  push:
+    branches: [{image_only}]
 
-jobs_block = s[s.index("\njobs:\n"):]
-jobs = re.findall(r"^  ([A-Za-z0-9_-]+):\s*$", jobs_block, re.M)
-if not jobs:
-    sys.exit("no jobs found")
+jobs:"""
+    needs = ""
+else:
+    ci = os.path.join(repo, ".github/workflows/ci.yml")
+    os.makedirs(os.path.dirname(ci), exist_ok=True)
+    s = open(ci).read()
+    if "sljmn/image-build" in s:
+        sys.exit("already adopted")
 
-job = f"""
-  # After green CI on the default branch: build the image on Avrea and push it
-  # to GHCR. bin/deploy deploys it with dokku git:from-image; the server builds nothing.
-  image:
-    needs: [{", ".join(jobs)}]
+    on = re.search(r"^on:\n((?:[ \t].*\n|\n)*?)(?=^\S)", s, re.M)
+    if not re.search(r"^  push:", on.group(1), re.M):
+        s = s.replace(on.group(0), "on:\n  push:\n" + on.group(1), 1)
+
+    jobs_block = s[s.index("\njobs:\n"):]
+    jobs = re.findall(r"^  ([A-Za-z0-9_-]+):\s*$", jobs_block, re.M)
+    if not jobs:
+        sys.exit("no jobs found")
+    needs = f"""    needs: [{", ".join(jobs)}]
     if: github.event_name == 'push' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch)
-    uses: sljmn/image-build/.github/workflows/image.yml@main
+"""
+comment = "" if image_only else """  # After green CI on the default branch: build the image on Avrea and push it
+  # to GHCR. bin/deploy deploys it with dokku git:from-image; the server builds nothing.
+"""
+job = f"""
+{comment}  image:
+{needs}    uses: sljmn/image-build/.github/workflows/image.yml@main
 """
 if builder != "dockerfile" or build_env or buildpacks:
     job += "    with:\n"
@@ -68,4 +88,4 @@ cd "$(dirname "$0")/.."
 exec bash -c "$(gh api -H 'Accept: application/vnd.github.raw' repos/sljmn/image-build/contents/bin/deploy-image)" deploy-image""" + (f" --target {target}" if target else "") + """ "$@"
 """)
 os.chmod(deploy, os.stat(deploy).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-print(f"{repo}: image job needs {jobs}; bin/deploy written")
+print(f"{repo}: image job written to {ci}; bin/deploy written")
