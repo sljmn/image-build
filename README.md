@@ -21,7 +21,12 @@ Builds app images on Avrea, pushes them to GHCR and deploys them to Dokku with
    ```
 
    Herokuish apps pass their non-secret build-time config as `build-env`
-   (one `KEY=value` per line). Secrets never go into the image.
+   (one `KEY=value` per line). Secrets never go into the image. When the
+   buildpacks are set on the server (`dokku buildpacks:list`) instead of in a
+   `.buildpacks` file, pass them as `buildpacks` (one URL per line). Dockerfile
+   apps pass `--build-arg` values from `docker-options` as `build-args`.
+   `bin/adopt REPO --target dokku@HOST:APP [--builder herokuish]` does steps 1
+   and 2.
 
 2. Add `bin/deploy`:
 

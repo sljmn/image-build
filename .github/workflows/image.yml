@@ -23,6 +23,10 @@ on:
         description: "Non-secret build environment (herokuish builder), one KEY=value per line"
         type: string
         default: ""
+      buildpacks:
+        description: "Herokuish buildpack URLs, one per line, as in `dokku buildpacks:list` (written to .buildpacks)"
+        type: string
+        default: ""
       herokuish-image:
         description: "Herokuish stack image, same as the server's"
         type: string
@@ -94,11 +98,13 @@ jobs:
         env:
           STACK: ${{ inputs.herokuish-image }}
           BUILD_ENV: ${{ inputs.build-env }}
+          BUILDPACKS: ${{ inputs.buildpacks }}
         run: |
           set -euo pipefail
           src=$(mktemp -d)
           git archive "$SHA" | tar -x -C "$src"
           rm -f "$src/.dockerignore"
+          if [ -n "$BUILDPACKS" ]; then printf '%s\n' "$BUILDPACKS" | grep -v '^\s*$' > "$src/.buildpacks"; fi
           cat > "$RUNNER_TEMP/copy-source.Dockerfile" <<'EOF'
           ARG APP_IMAGE
           FROM $APP_IMAGE

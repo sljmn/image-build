@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Adds the image job and bin/deploy to an app repository.
 
-Usage: adopt REPO_DIR [--target dokku@HOST:APP] [--builder herokuish] [--build-env-file FILE]
+Usage: adopt REPO_DIR [--target dokku@HOST:APP] [--builder herokuish] [--build-env-file FILE] [--buildpacks URL,URL]
 Makes CI run on pushes to the default branch, appends the `image` job after
 every existing job and writes bin/deploy. Docs are edited by hand.
 """
@@ -12,10 +12,12 @@ repo = args.pop(0)
 builder = "dockerfile"
 build_env = ""
 target = ""
+buildpacks = ""
 while args:
     a = args.pop(0)
     if a == "--builder": builder = args.pop(0)
     elif a == "--target": target = args.pop(0)
+    elif a == "--buildpacks": buildpacks = args.pop(0)
     elif a == "--build-env-file": build_env = open(args.pop(0)).read().strip()
 
 ci = os.path.join(repo, ".github/workflows/ci.yml")
@@ -41,10 +43,12 @@ job = f"""
     if: github.event_name == 'push' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch)
     uses: sljmn/image-build/.github/workflows/image.yml@main
 """
-if builder != "dockerfile" or build_env:
+if builder != "dockerfile" or build_env or buildpacks:
     job += "    with:\n"
     if builder != "dockerfile":
         job += f"      builder: {builder}\n"
+    if buildpacks:
+        job += "      buildpacks: |\n" + "".join(f"        {b}\n" for b in buildpacks.split(","))
     if build_env:
         job += "      build-env: |\n" + "".join(f"        {l}\n" for l in build_env.splitlines())
 job += """    permissions:
