@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Deploys the image CI built on Avrea for a commit to the app's Dokku server:
+#   dokku git:from-image <app> ghcr.io/sljmn/<repo>@sha256:<digest>
+# Nothing is built on the server or on this machine.
+#
+# Usage (from the app repository, through its bin/deploy):
+#   bin/deploy                 deploy the pushed HEAD of the default branch
+#   bin/deploy <sha>           deploy (or roll back to) an earlier commit's image
+#   bin/deploy --remote NAME   use git remote NAME instead of "dokku"
+#
+# The git remote gives the server and app (dokku@HOST:APP). The image digest
+# comes from the commit status "image" that the image workflow sets.
+set -euo pipefail
+
+remote=dokku
+sha=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --remote) remote="$2"; shift 2 ;;
+    -h|--help) sed -n '2,13p' "$0" 2>/dev/null || true; exit 0 ;;
+    *) sha="$1"; shift ;;
+  esac
+done
+
+die() { echo "deploy: $*" >&2; exit 1; }
+
+url=$(git remote get-url "$remote" 2>/dev/null) || die "no git remote '$remote'"
+[[ "$url" =~ ^(ssh://)?([^@/]+@[^:/]+)[:/](.+)$ ]] || die "cannot parse remote $url"
+target="${BASH_REMATCH[2]}"
+app="${BASH_REMATCH[3]%.git}"
+repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+image="ghcr.io/$(echo "$repo" | tr '[:upper:]' '[:lower:]')"
+
+if [ -z "$sha" ]; then
+  [ -z "$(git status --porcelain --untracked-files=no)" ] || die "commit your changes first"
+  default=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+  git fetch -q origin "$default"
+  sha=$(git rev-parse HEAD)
+  [ "$(git rev-parse "origin/$default")" = "$sha" ] || die "HEAD is not origin/$default; push to $default first"
+else
+  sha=$(git rev-parse "$sha^{commit}")
+fi
+
+echo "deploy: $repo $sha -> $target $app"
+digest=""
+for i in $(seq 240); do
+  status=$(gh api "repos/$repo/commits/$sha/statuses" --jq '[.[]|select(.context=="image")][0] // {} | "\(.state // "none") \(.description // "") \(.target_url // "")"')
+  read -r state desc link <<<"$status"
+  case "$state" in
+    success) digest="$desc"; break ;;
+    failure|error) die "image build failed for $sha: $link" ;;
+    pending) [ "$i" = 1 ] && echo "deploy: waiting for image build $link" ;;
+    none) [ "$i" = 1 ] && echo "deploy: waiting for CI (tests, then image) on $sha" ;;
+  esac
+  [ "$state" = none ] && [ "$i" -ge 120 ] && die "no image build started for $sha; is the image job in CI and did CI pass?"
+  sleep 15
+done
+[[ "$digest" == sha256:* ]] || die "timed out waiting for the image of $sha"
+
+ref="$image@$digest"
+echo "deploy: $ref"
+# GIT_REV holds the source commit, not the commit Dokku creates for the image.
+ssh "$target" git:set "$app" rev-env-var DOKKU_GIT_REV >/dev/null
+ssh "$target" config:set --no-restart "$app" "GIT_REV=$sha" >/dev/null
+ssh "$target" git:from-image "$app" "$ref"
+ssh "$target" ps:report "$app" | grep -E 'Running|Status ' || true
+echo "deploy: done $app $sha"

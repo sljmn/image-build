@@ -1,0 +1,157 @@
+# Builds the app image on Avrea and pushes it to ghcr.io/sljmn/<repo>:<sha>.
+# Call it as the last job of a repository's CI, after the test jobs, on the
+# default branch only. It sets the commit status "image" with the digest, which
+# bin/deploy reads to run `dokku git:from-image` on the server.
+name: image
+
+on:
+  workflow_call:
+    inputs:
+      builder:
+        description: "dockerfile or herokuish (match the app's Dokku builder)"
+        type: string
+        default: dockerfile
+      dockerfile:
+        description: "Dockerfile path for the dockerfile builder"
+        type: string
+        default: Dockerfile
+      build-args:
+        description: "Non-secret build args (dockerfile builder), one KEY=value per line"
+        type: string
+        default: ""
+      build-env:
+        description: "Non-secret build environment (herokuish builder), one KEY=value per line"
+        type: string
+        default: ""
+      herokuish-image:
+        description: "Herokuish stack image, same as the server's"
+        type: string
+        default: gliderlabs/herokuish:v0.11.25-24
+      runs-on:
+        type: string
+        default: avrea-ubuntu-latest-4-vcpu
+    outputs:
+      digest:
+        value: ${{ jobs.image.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: write
+  statuses: write
+
+jobs:
+  image:
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Mark image pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state=pending -f context=image \
+            -f description="Building image" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
+
+      # Dockerfile apps: BuildKit with Avrea's colocated layer cache.
+      - if: inputs.builder == 'dockerfile'
+        uses: docker/setup-buildx-action@v3
+
+      - if: inputs.builder == 'dockerfile'
+        id: dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          push: true
+          provenance: false
+          build-args: ${{ inputs.build-args }}
+          tags: ${{ env.IMAGE }}:${{ env.SHA }}
+          labels: org.opencontainers.image.revision=${{ env.SHA }}
+          cache-from: type=gha,url_v2=https://cache.avrea.com/
+          cache-to: type=gha,url_v2=https://cache.avrea.com/,mode=max
+
+      # Herokuish apps: the same steps Dokku's herokuish builder runs on the
+      # server (copy-source, /build, commit), on the runner instead.
+      - if: inputs.builder == 'herokuish'
+        name: Restore buildpack cache
+        uses: actions/cache/restore@v4
+        with:
+          path: herokuish-cache.tar
+          key: herokuish-${{ hashFiles('Gemfile.lock', 'package-lock.json', '.buildpacks', '.ruby-version', '.node-version') }}
+          restore-keys: herokuish-
+
+      - if: inputs.builder == 'herokuish'
+        name: Build with herokuish
+        env:
+          STACK: ${{ inputs.herokuish-image }}
+          BUILD_ENV: ${{ inputs.build-env }}
+        run: |
+          set -euo pipefail
+          src=$(mktemp -d)
+          git archive "$SHA" | tar -x -C "$src"
+          rm -f "$src/.dockerignore"
+          cat > "$RUNNER_TEMP/copy-source.Dockerfile" <<'EOF'
+          ARG APP_IMAGE
+          FROM $APP_IMAGE
+          RUN USER=herokuishuser /exec true
+          COPY --chown=herokuishuser . /app
+          WORKDIR /app
+          ENV HEROKUISH_DISABLE_CHOWN true
+          EOF
+          docker build -q -f "$RUNNER_TEMP/copy-source.Dockerfile" --build-arg APP_IMAGE="$STACK" -t herokuish-source "$src"
+
+          printf '%s\n' "$BUILD_ENV" | grep -v '^\s*$' > "$RUNNER_TEMP/build.env" || true
+          docker volume create herokuish-cache >/dev/null
+          if [ -f herokuish-cache.tar ]; then
+            docker run --rm -v herokuish-cache:/cache -v "$PWD:/in" busybox tar -xf /in/herokuish-cache.tar -C /cache
+          fi
+          cid=$(docker container create -v herokuish-cache:/cache --env CACHE_PATH=/cache --env USER=herokuishuser \
+            --env-file "$RUNNER_TEMP/build.env" herokuish-source /build)
+          docker container start -a "$cid"
+          [ "$(docker container wait "$cid")" = 0 ]
+          docker container commit \
+            --change "LABEL org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --change "LABEL org.opencontainers.image.revision=$SHA" \
+            --change "LABEL com.dokku.builder-type=herokuish" \
+            "$cid" "$IMAGE:$SHA" >/dev/null
+          docker push -q "$IMAGE:$SHA"
+          rm -f herokuish-cache.tar
+          docker run --rm -v herokuish-cache:/cache -v "$PWD:/out" busybox tar -cf /out/herokuish-cache.tar -C /cache .
+
+      - if: inputs.builder == 'herokuish'
+        name: Save buildpack cache
+        uses: actions/cache/save@v4
+        with:
+          path: herokuish-cache.tar
+          key: herokuish-${{ hashFiles('Gemfile.lock', 'package-lock.json', '.buildpacks', '.ruby-version', '.node-version') }}-${{ github.run_id }}
+
+      - name: Record digest
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "$IMAGE:$SHA" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" == sha256:* ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state=success -f context=image \
+            -f description="$digest" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
+          echo "$IMAGE@$digest"
+
+      - if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state=failure -f context=image \
+            -f description="Image build failed" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
