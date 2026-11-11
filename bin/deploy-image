@@ -65,7 +65,12 @@ ref="$image@$digest"
 echo "deploy: $ref"
 # GIT_REV holds the source commit, not the commit Dokku creates for the image.
 ssh "$target" git:set "$app" rev-env-var DOKKU_GIT_REV >/dev/null
+previous=$(ssh "$target" config:get "$app" GIT_REV 2>/dev/null || true)
 ssh "$target" config:set --no-restart "$app" "GIT_REV=$sha" >/dev/null
-ssh "$target" git:from-image "$app" "$ref"
+if ! ssh "$target" git:from-image "$app" "$ref"; then
+  # The running release is unchanged; put its GIT_REV back.
+  [ -n "$previous" ] && ssh "$target" config:set --no-restart "$app" "GIT_REV=$previous" >/dev/null
+  die "git:from-image failed; $app still runs ${previous:-its previous release}"
+fi
 ssh "$target" ps:report "$app" | grep -E 'Running|Status ' || true
 echo "deploy: done $app $sha"
