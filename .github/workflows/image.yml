@@ -7,6 +7,10 @@ name: image
 on:
   workflow_call:
     inputs:
+      sha:
+        description: "Commit to build (default: the commit that triggered the caller)"
+        type: string
+        default: ""
       builder:
         description: "dockerfile or herokuish (match the app's Dokku builder)"
         type: string
@@ -49,9 +53,11 @@ jobs:
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     env:
-      SHA: ${{ github.sha }}
+      SHA: ${{ inputs.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
 
       # Image names must be lowercase (bin/deploy lowercases the same way).
       - name: Image name
