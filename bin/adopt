@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Adds the image job and bin/deploy to an app repository.
 
-Usage: adopt REPO_DIR [--builder herokuish] [--build-env-file FILE]
+Usage: adopt REPO_DIR [--target dokku@HOST:APP] [--builder herokuish] [--build-env-file FILE]
 Makes CI run on pushes to the default branch, appends the `image` job after
 every existing job and writes bin/deploy. Docs are edited by hand.
 """
@@ -11,9 +11,11 @@ args = sys.argv[1:]
 repo = args.pop(0)
 builder = "dockerfile"
 build_env = ""
+target = ""
 while args:
     a = args.pop(0)
     if a == "--builder": builder = args.pop(0)
+    elif a == "--target": target = args.pop(0)
     elif a == "--build-env-file": build_env = open(args.pop(0)).read().strip()
 
 ci = os.path.join(repo, ".github/workflows/ci.yml")
@@ -59,7 +61,7 @@ open(deploy, "w").write("""#!/usr/bin/env bash
 # bin/deploy [<sha>] [--remote NAME]; see https://github.com/sljmn/image-build
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec bash -c "$(gh api -H 'Accept: application/vnd.github.raw' repos/sljmn/image-build/contents/bin/deploy-image)" deploy-image "$@"
+exec bash -c "$(gh api -H 'Accept: application/vnd.github.raw' repos/sljmn/image-build/contents/bin/deploy-image)" deploy-image""" + (f" --target {target}" if target else "") + """ "$@"
 """)
 os.chmod(deploy, os.stat(deploy).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 print(f"{repo}: image job needs {jobs}; bin/deploy written")
