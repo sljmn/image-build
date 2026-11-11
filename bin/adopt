@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Adds the image job and bin/deploy to an app repository.
+
+Usage: adopt REPO_DIR [--builder herokuish] [--build-env-file FILE]
+Makes CI run on pushes to the default branch, appends the `image` job after
+every existing job and writes bin/deploy. Docs are edited by hand.
+"""
+import os, re, stat, sys
+
+args = sys.argv[1:]
+repo = args.pop(0)
+builder = "dockerfile"
+build_env = ""
+while args:
+    a = args.pop(0)
+    if a == "--builder": builder = args.pop(0)
+    elif a == "--build-env-file": build_env = open(args.pop(0)).read().strip()
+
+ci = os.path.join(repo, ".github/workflows/ci.yml")
+os.makedirs(os.path.dirname(ci), exist_ok=True)
+s = open(ci).read()
+if "sljmn/image-build" in s:
+    sys.exit("already adopted")
+
+on = re.search(r"^on:\n((?:[ \t].*\n|\n)*?)(?=^\S)", s, re.M)
+if not re.search(r"^  push:", on.group(1), re.M):
+    s = s.replace(on.group(0), "on:\n  push:\n" + on.group(1), 1)
+
+jobs_block = s[s.index("\njobs:\n"):]
+jobs = re.findall(r"^  ([A-Za-z0-9_-]+):\s*$", jobs_block, re.M)
+if not jobs:
+    sys.exit("no jobs found")
+
+job = f"""
+  # After green CI on the default branch: build the image on Avrea and push it
+  # to GHCR. bin/deploy deploys it with dokku git:from-image; the server builds nothing.
+  image:
+    needs: [{", ".join(jobs)}]
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch)
+    uses: sljmn/image-build/.github/workflows/image.yml@main
+"""
+if builder != "dockerfile" or build_env:
+    job += "    with:\n"
+    if builder != "dockerfile":
+        job += f"      builder: {builder}\n"
+    if build_env:
+        job += "      build-env: |\n" + "".join(f"        {l}\n" for l in build_env.splitlines())
+job += """    permissions:
+      contents: read
+      packages: write
+      statuses: write
+"""
+open(ci, "w").write(s.rstrip("\n") + "\n" + job)
+
+deploy = os.path.join(repo, "bin/deploy")
+os.makedirs(os.path.dirname(deploy), exist_ok=True)
+open(deploy, "w").write("""#!/usr/bin/env bash
+# Deploys the image CI built on Avrea to Dokku (dokku git:from-image).
+# bin/deploy [<sha>] [--remote NAME]; see https://github.com/sljmn/image-build
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec bash -c "$(gh api -H 'Accept: application/vnd.github.raw' repos/sljmn/image-build/contents/bin/deploy-image)" deploy-image "$@"
+""")
+os.chmod(deploy, os.stat(deploy).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+print(f"{repo}: image job needs {jobs}; bin/deploy written")
