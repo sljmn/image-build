@@ -65,6 +65,9 @@ ref="$image@$digest"
 echo "deploy: $ref"
 # GIT_REV holds the source commit, not the commit Dokku creates for the image.
 ssh "$target" git:set "$app" rev-env-var DOKKU_GIT_REV >/dev/null
+# git:from-image wraps the image in a one-line Dockerfile. A herokuish builder
+# or server-side buildpacks would otherwise rebuild it from scratch.
+ssh "$target" builder:set "$app" selected dockerfile >/dev/null
 previous=$(ssh "$target" config:get "$app" GIT_REV 2>/dev/null || true)
 ssh "$target" config:set --no-restart "$app" "GIT_REV=$sha" >/dev/null
 if ! ssh "$target" git:from-image "$app" "$ref"; then
