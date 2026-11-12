@@ -41,6 +41,12 @@ Builds app images on Avrea, pushes them to GHCR and deploys them to Dokku with
    for CI and the image, then runs `dokku git:from-image` over the `dokku` git
    remote (`--remote NAME` for another remote).
 
+For a Ubicloud pilot, pass `runs-on: ubicloud-standard-4` and `cache-url: ""`
+to the image job. The empty URL uses the runner's GHA cache endpoint, including
+Ubicloud transparent caching. Other callers keep Avrea and its cache by default.
+Premium versus Standard is selected in the Ubicloud account settings, not the
+runner label.
+
 ## Servers
 
 Each Dokku server is logged in to ghcr.io with a read-only token

@@ -1,4 +1,4 @@
-# Builds the app image on Avrea and pushes it to ghcr.io/sljmn/<repo>:<sha>.
+# Builds the app image on a hosted runner (Avrea by default) and pushes it to ghcr.io/sljmn/<repo>:<sha>.
 # Call it as the last job of a repository's CI, after the test jobs, on the
 # default branch only. It sets the commit status "image" with the digest, which
 # bin/deploy reads to run `dokku git:from-image` on the server.
@@ -35,6 +35,10 @@ on:
         description: "Herokuish stack image, same as the server's"
         type: string
         default: gliderlabs/herokuish:v0.11.25-24
+      cache-url:
+        description: "GHA cache endpoint; empty uses the runner default (for example Ubicloud transparent cache)"
+        type: string
+        default: https://cache.avrea.com/
       runs-on:
         type: string
         default: avrea-ubuntu-latest-4-vcpu
@@ -74,7 +78,7 @@ jobs:
             -f description="Building image" \
             -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
 
-      # Dockerfile apps: BuildKit with Avrea's colocated layer cache.
+      # Dockerfile apps: BuildKit with the selected runner cache.
       - if: inputs.builder == 'dockerfile'
         uses: docker/setup-buildx-action@v3
 
@@ -89,8 +93,8 @@ jobs:
           build-args: ${{ inputs.build-args }}
           tags: ${{ env.IMAGE }}:${{ env.SHA }}
           labels: org.opencontainers.image.revision=${{ env.SHA }}
-          cache-from: type=gha,url_v2=https://cache.avrea.com/
-          cache-to: type=gha,url_v2=https://cache.avrea.com/,mode=max
+          cache-from: ${{ inputs.cache-url && format('type=gha,url_v2={0}', inputs.cache-url) || 'type=gha' }}
+          cache-to: ${{ inputs.cache-url && format('type=gha,url_v2={0},mode=max', inputs.cache-url) || 'type=gha,mode=max' }}
 
       # Herokuish apps: the same steps Dokku's herokuish builder runs on the
       # server (copy-source, /build, commit), on the runner instead.
